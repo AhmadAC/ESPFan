@@ -1,3 +1,4 @@
+#################### START OF FILE: main\main.cpp ####################
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -145,55 +146,41 @@ void console_task(void *pvParameters) {
 // CAPTIVE PORTAL DNS TASK
 // ============================================================================
 void dns_server_task(void *pvParameters) {
-    struct sockaddr_in serv_addr;
-    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock < 0) {
-        ESP_LOGE(TAG, "DNS socket failed");
-        vTaskDelete(NULL);
-        return;
-    }
-    
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    serv_addr.sin_port = htons(53);
-    
-    if (bind(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        ESP_LOGE(TAG, "DNS bind failed");
-        close(sock);
-        vTaskDelete(NULL);
-        return;
-    }
-    
     char rx_buffer[128];
-    char tx_buffer[128];
-    struct sockaddr_in source_addr;
-    socklen_t addr_len = sizeof(source_addr);
+    struct sockaddr_in dest_addr;
+    dest_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(53);
+    
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sock < 0) { vTaskDelete(NULL); return; }
+    if (bind(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0) { close(sock); vTaskDelete(NULL); return; }
     
     ESP_LOGI(TAG, "Captive Portal DNS Server listening on port 53");
-    
+
     while (1) {
-        int len = recvfrom(sock, rx_buffer, sizeof(rx_buffer), 0, (struct sockaddr *)&source_addr, &addr_len);
+        struct sockaddr_storage source_addr;
+        socklen_t socklen = sizeof(source_addr);
+        int len = recvfrom(sock, rx_buffer, sizeof(rx_buffer) - 1, 0, (struct sockaddr *)&source_addr, &socklen);
+        
+        if (len < 0) { vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
         if (len > 12) {
-            if (len > (int)sizeof(tx_buffer)) len = sizeof(tx_buffer);
-            memcpy(tx_buffer, rx_buffer, len);
+            rx_buffer[2] = 0x81; rx_buffer[3] = 0x80;
+            rx_buffer[6] = rx_buffer[4]; rx_buffer[7] = rx_buffer[5];
+            rx_buffer[8] = 0; rx_buffer[9] = 0; rx_buffer[10] = 0; rx_buffer[11] = 0; 
             
-            tx_buffer[2] |= 0x80; 
-            tx_buffer[6] = tx_buffer[4]; 
-            tx_buffer[7] = tx_buffer[5];
+            int pos = len;
+            rx_buffer[pos++] = 0xC0; rx_buffer[pos++] = 0x0C;
+            rx_buffer[pos++] = 0x00; rx_buffer[pos++] = 0x01;
+            rx_buffer[pos++] = 0x00; rx_buffer[pos++] = 0x01;
+            rx_buffer[pos++] = 0x00; rx_buffer[pos++] = 0x00;
+            rx_buffer[pos++] = 0x00; rx_buffer[pos++] = 0x3C;
+            rx_buffer[pos++] = 0x00; rx_buffer[pos++] = 0x04;
+            rx_buffer[pos++] = 192;  rx_buffer[pos++] = 168;
+            rx_buffer[pos++] = 4;    rx_buffer[pos++] = 1;
             
-            int p = len;
-            if (p + 16 <= (int)sizeof(tx_buffer)) {
-                tx_buffer[p++] = 0xC0; tx_buffer[p++] = 0x0C; 
-                tx_buffer[p++] = 0x00; tx_buffer[p++] = 0x01; 
-                tx_buffer[p++] = 0x00; tx_buffer[p++] = 0x01; 
-                tx_buffer[p++] = 0x00; tx_buffer[p++] = 0x00; tx_buffer[p++] = 0x00; tx_buffer[p++] = 0x3C; 
-                tx_buffer[p++] = 0x00; tx_buffer[p++] = 0x04; 
-                tx_buffer[p++] = 192; tx_buffer[p++] = 168; tx_buffer[p++] = 4; tx_buffer[p++] = 1; 
-                sendto(sock, tx_buffer, p, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
-            }
+            sendto(sock, rx_buffer, pos, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -516,6 +503,11 @@ void start_webserver(void) {
             httpd_uri_t uri_loop     = { .uri = "/api/loop", .method = HTTP_GET, .handler = loop_get_handler, .user_ctx = NULL };
             httpd_uri_t uri_favicon  = { .uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_get_handler, .user_ctx = NULL };
             
+            // Explicit Captive Portal probe endpoints commonly used by OSes
+            httpd_uri_t uri_cp1 = { .uri = "/generate_204", .method = HTTP_GET, .handler = captive_portal_wildcard_handler, .user_ctx = NULL };
+            httpd_uri_t uri_cp2 = { .uri = "/hotspot-detect.html", .method = HTTP_GET, .handler = captive_portal_wildcard_handler, .user_ctx = NULL };
+            httpd_uri_t uri_cp3 = { .uri = "/ncsi.txt", .method = HTTP_GET, .handler = captive_portal_wildcard_handler, .user_ctx = NULL };
+            
             // Catchalls for Captive Portal (must be registered last!)
             httpd_uri_t uri_catchall_get  = { .uri = "/*", .method = HTTP_GET, .handler = captive_portal_wildcard_handler, .user_ctx = NULL };
             httpd_uri_t uri_catchall_post = { .uri = "/*", .method = HTTP_POST, .handler = captive_portal_wildcard_handler, .user_ctx = NULL };
@@ -531,6 +523,11 @@ void start_webserver(void) {
             httpd_register_uri_handler(server, &uri_stop);
             httpd_register_uri_handler(server, &uri_loop);
             httpd_register_uri_handler(server, &uri_favicon);
+            
+            httpd_register_uri_handler(server, &uri_cp1);
+            httpd_register_uri_handler(server, &uri_cp2);
+            httpd_register_uri_handler(server, &uri_cp3);
+            
             httpd_register_uri_handler(server, &uri_catchall_get);
             httpd_register_uri_handler(server, &uri_catchall_post);
             httpd_register_uri_handler(server, &uri_catchall_head);
@@ -581,13 +578,26 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &wifi_event_handler, NULL, &instance_any_id));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip));
 
-    // 4. Configure Fallback AP Mode parameters
+    // 4. Configure Fallback AP Mode parameters with WPA2 password to prevent modern OS automatic disconnections
     wifi_config_t ap_config = {};
     strcpy((char*)ap_config.ap.ssid, "ESP32S3_Config");
+    strcpy((char*)ap_config.ap.password, "12345678");
     ap_config.ap.ssid_len = strlen("ESP32S3_Config");
     ap_config.ap.channel = 1;
     ap_config.ap.max_connection = 4;
-    ap_config.ap.authmode = WIFI_AUTH_OPEN; 
+    ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK; 
+
+    // Explicitly configure the IP scheme so it matches the captive portal routing exact expectations
+    esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (ap_netif) {
+        esp_netif_ip_info_t ip_info;
+        IP4_ADDR(&ip_info.ip, 192, 168, 4, 1);
+        IP4_ADDR(&ip_info.gw, 192, 168, 4, 1);
+        IP4_ADDR(&ip_info.netmask, 255, 255, 255, 0);
+        esp_netif_dhcps_stop(ap_netif);
+        esp_netif_set_ip_info(ap_netif, &ip_info);
+        esp_netif_dhcps_start(ap_netif);
+    }
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
@@ -633,7 +643,7 @@ extern "C" void app_main(void) {
         disconnect_time = esp_timer_get_time(); 
         esp_wifi_connect();
     } else {
-        ESP_LOGW(TAG, "No Wi-Fi saved. Fallback AP active (Connect to 'ESP32S3_Config' / 192.168.4.1)");
+        ESP_LOGW(TAG, "No Wi-Fi saved. Fallback AP active (Connect to 'ESP32S3_Config', Password: '12345678' / 192.168.4.1)");
     }
 
     // 7. Start Sub-systems now that the TCP/IP network stack is up
@@ -645,3 +655,4 @@ extern "C" void app_main(void) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
+#################### END OF FILE: main\main.cpp ####################
