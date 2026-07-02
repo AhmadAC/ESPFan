@@ -136,7 +136,7 @@ void console_task(void *pvParameters) {
 }
 
 // ============================================================================
-// CAPTIVE PORTAL DNS TASK (Identical to ESP_IR_AC)
+// CAPTIVE PORTAL DNS TASK 
 // ============================================================================
 void dns_server_task(void *pvParameters) {
     char rx_buffer[128];
@@ -288,7 +288,7 @@ const char app_html[] = R"raw_html(
 </style>
 <script>
     function updateThrottle(val) {
-        let d = val == 0 ? "Stopped" : (val > 0 ? "Forward " + val + "%" : "Reverse " + Math.abs(val) + "%");
+        let d = val == 0 ? "Stopped" : (val > 0 ? "Reverse " + val + "%" : "Forward " + Math.abs(val) + "%");
         document.getElementById('disp').innerText = d;
         fetch('/api/throttle?val=' + val);
     }
@@ -307,9 +307,9 @@ const char app_html[] = R"raw_html(
             <h2 id="disp" style="font-size:1.8rem;margin:15px 0;color:white;text-shadow:0 0 10px #0ea5e9">Stopped</h2>
             <input type="range" id="slider" min="-100" max="100" value="0" step="5" oninput="updateThrottle(this.value)">
             <div class="grid-3">
-                <button class="btn-gray" onclick="sendCmd('/api/throttle?val=-100','Reverse Max', -100)">Rev</button>
+                <button class="btn-gray" onclick="sendCmd('/api/throttle?val=-100','Forward Max', -100)">Fwd</button>
                 <button class="btn-red" onclick="sendCmd('/api/stop','Stopped', 0)">STOP</button>
-                <button class="btn-gray" onclick="sendCmd('/api/throttle?val=100','Forward Max', 100)">Fwd</button>
+                <button class="btn-gray" onclick="sendCmd('/api/throttle?val=100','Reverse Max', 100)">Rev</button>
             </div>
             <button class="btn-blue" onclick="sendCmd('/api/loop','Breeze Mode')">Breeze Mode</button>
             <button class="btn-gray" style="margin-top:20px; background:#0f172a; border:1px solid #475569;" onclick="location.href='/setup'">Go to Wi-Fi Setup</button>
@@ -540,6 +540,9 @@ extern "C" void app_main(void) {
     esp_log_level_set("httpd_parse", ESP_LOG_ERROR);
     esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
     esp_log_level_set("httpd_uri", ESP_LOG_ERROR);
+    
+    // Silence Wi-Fi PMF SA Query spam and normal info logs
+    esp_log_level_set("wifi", ESP_LOG_WARN);
 
     // 1. Initialize NVS
     esp_err_t ret = nvs_flash_init();
