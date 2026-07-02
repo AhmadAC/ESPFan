@@ -1,4 +1,3 @@
-#################### START OF FILE: main\main.cpp ####################
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -41,7 +40,7 @@ static float loop_dir = 1.0f;
 void init_motor_pwm(void) {
     ledc_timer_config_t timer_cfg = {};
     timer_cfg.speed_mode = LEDC_LOW_SPEED_MODE;
-    timer_cfg.duty_resolution = LEDC_TIMER_10_BIT; // 0 to 1023
+    timer_cfg.duty_resolution = LEDC_TIMER_10_BIT; 
     timer_cfg.timer_num = LEDC_TIMER_0;
     timer_cfg.freq_hz = 1000;
     timer_cfg.clk_cfg = LEDC_AUTO_CLK;
@@ -73,7 +72,6 @@ void motor_control_task(void *pvParameter) {
     while (1) {
         if (breeze_mode) {
             float nxt = current_throttle + (loop_dir * step);
-            // Drop down to 5% UI (maps to prevent stall)
             if (nxt >= 100.0f || nxt <= 5.0f) {
                 loop_dir *= -1.0f;
             }
@@ -91,26 +89,21 @@ void motor_control_task(void *pvParameter) {
 
         uint32_t duty = 0;
         if (fabs(current_throttle) > 0.1f) {
-            // Remap 0->100% UI throttle to physical duty cycle (0 -> 1023)
-            // You can adjust the offset if the motor needs a higher starting voltage
             duty = (uint32_t)((fabs(current_throttle) / 100.0f) * 1023.0f);
             if (duty > 1023) duty = 1023;
         }
 
         if (current_throttle > 0.1f) {
-            // Forward (L9110: A = High/PWM, B = Low)
             ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
             ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
             ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
             ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
         } else if (current_throttle < -0.1f) {
-            // Reverse (L9110: A = Low, B = High/PWM)
             ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
             ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
             ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, duty);
             ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
         } else {
-            // Stopped (L9110: A = Low, B = Low)
             ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
             ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
             ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
@@ -143,7 +136,7 @@ void console_task(void *pvParameters) {
 }
 
 // ============================================================================
-// CAPTIVE PORTAL DNS TASK
+// CAPTIVE PORTAL DNS TASK (Identical to ESP_IR_AC)
 // ============================================================================
 void dns_server_task(void *pvParameters) {
     char rx_buffer[128];
@@ -221,39 +214,9 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
 }
 
 // ============================================================================
-// WEB DASHBOARD HANDLERS
+// WEB DASHBOARD HTML ASSETS
 // ============================================================================
-static void delayed_reboot_task(void *pvParameter) {
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    esp_restart();
-}
-
-static esp_err_t root_get_handler(httpd_req_t *req) {
-    httpd_resp_set_status(req, "302 Found");
-    if (ap_fallback_active) {
-        httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/setup");
-    } else {
-        httpd_resp_set_hdr(req, "Location", "/app");
-    }
-    httpd_resp_send(req, NULL, 0);
-    return ESP_OK;
-}
-
-// Intercepts all OS connectivity checks seamlessly (silences "URI not found" warnings)
-// Handles GET, POST (e.g. WeChat /mmtls/), and HEAD captive portal probes.
-static esp_err_t captive_portal_wildcard_handler(httpd_req_t *req) {
-    httpd_resp_set_status(req, "302 Found");
-    if (ap_fallback_active) {
-        httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/setup");
-    } else {
-        httpd_resp_set_hdr(req, "Location", "/app");
-    }
-    httpd_resp_send(req, NULL, 0);
-    return ESP_OK;
-}
-
-static esp_err_t setup_get_handler(httpd_req_t *req) {
-    const char* setup_html = R"raw_html(
+const char setup_html[] = R"raw_html(
 <!DOCTYPE html><html><head><meta charset="utf-8"><title>ESP Setup</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
     :root { --primary: #0ea5e9; --bg: #0f172a; --card: #1e293b; --text: #f1f5f9; }
@@ -304,12 +267,8 @@ static esp_err_t setup_get_handler(httpd_req_t *req) {
     </script>
 </body></html>
 )raw_html";
-    httpd_resp_send(req, setup_html, HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-}
 
-static esp_err_t app_get_handler(httpd_req_t *req) {
-    const char* app_html = R"raw_html(
+const char app_html[] = R"raw_html(
 <!DOCTYPE html><html><head><meta charset="utf-8"><title>Fan Control</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
     :root { --primary: #0ea5e9; --bg: #0f172a; --card: #1e293b; --text: #f1f5f9; }
@@ -358,6 +317,39 @@ static esp_err_t app_get_handler(httpd_req_t *req) {
     </div>
 </body></html>
 )raw_html";
+
+// ============================================================================
+// WEB DASHBOARD HANDLERS
+// ============================================================================
+static void delayed_reboot_task(void *pvParameter) {
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_restart();
+}
+
+// Redirects all unknown URLs (mostly from OS Captive Portal checks) directly to the Web root (192.168.4.1/)
+static esp_err_t captive_portal_redirect(httpd_req_t *req) {
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
+// Directly serves the HTML payload on the root directory rather than bouncing phones around
+static esp_err_t root_get_handler(httpd_req_t *req) {
+    if (ap_fallback_active) {
+        httpd_resp_send(req, setup_html, HTTPD_RESP_USE_STRLEN);
+    } else {
+        httpd_resp_send(req, app_html, HTTPD_RESP_USE_STRLEN);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t setup_get_handler(httpd_req_t *req) {
+    httpd_resp_send(req, setup_html, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+static esp_err_t app_get_handler(httpd_req_t *req) {
     httpd_resp_send(req, app_html, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
@@ -487,7 +479,7 @@ static esp_err_t favicon_get_handler(httpd_req_t *req) {
 void start_webserver(void) {
     if (server == NULL) {
         httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-        config.max_uri_handlers = 24; // Increased to accommodate POST and HEAD catchalls
+        config.max_uri_handlers = 24; 
         config.stack_size = 8192;
         config.uri_match_fn = httpd_uri_match_wildcard;
         
@@ -503,15 +495,15 @@ void start_webserver(void) {
             httpd_uri_t uri_loop     = { .uri = "/api/loop", .method = HTTP_GET, .handler = loop_get_handler, .user_ctx = NULL };
             httpd_uri_t uri_favicon  = { .uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_get_handler, .user_ctx = NULL };
             
-            // Explicit Captive Portal probe endpoints commonly used by OSes
-            httpd_uri_t uri_cp1 = { .uri = "/generate_204", .method = HTTP_GET, .handler = captive_portal_wildcard_handler, .user_ctx = NULL };
-            httpd_uri_t uri_cp2 = { .uri = "/hotspot-detect.html", .method = HTTP_GET, .handler = captive_portal_wildcard_handler, .user_ctx = NULL };
-            httpd_uri_t uri_cp3 = { .uri = "/ncsi.txt", .method = HTTP_GET, .handler = captive_portal_wildcard_handler, .user_ctx = NULL };
+            // Explicit Captive Portal probe endpoints used by iOS and Android
+            httpd_uri_t uri_cp1 = { .uri = "/generate_204", .method = HTTP_GET, .handler = captive_portal_redirect, .user_ctx = NULL };
+            httpd_uri_t uri_cp2 = { .uri = "/hotspot-detect.html", .method = HTTP_GET, .handler = captive_portal_redirect, .user_ctx = NULL };
+            httpd_uri_t uri_cp3 = { .uri = "/ncsi.txt", .method = HTTP_GET, .handler = captive_portal_redirect, .user_ctx = NULL };
             
-            // Catchalls for Captive Portal (must be registered last!)
-            httpd_uri_t uri_catchall_get  = { .uri = "/*", .method = HTTP_GET, .handler = captive_portal_wildcard_handler, .user_ctx = NULL };
-            httpd_uri_t uri_catchall_post = { .uri = "/*", .method = HTTP_POST, .handler = captive_portal_wildcard_handler, .user_ctx = NULL };
-            httpd_uri_t uri_catchall_head = { .uri = "/*", .method = HTTP_HEAD, .handler = captive_portal_wildcard_handler, .user_ctx = NULL };
+            // Catchalls for unknown URLs (must be registered last!)
+            httpd_uri_t uri_catchall_get  = { .uri = "/*", .method = HTTP_GET, .handler = captive_portal_redirect, .user_ctx = NULL };
+            httpd_uri_t uri_catchall_post = { .uri = "/*", .method = HTTP_POST, .handler = captive_portal_redirect, .user_ctx = NULL };
+            httpd_uri_t uri_catchall_head = { .uri = "/*", .method = HTTP_HEAD, .handler = captive_portal_redirect, .user_ctx = NULL };
             
             httpd_register_uri_handler(server, &uri_root);
             httpd_register_uri_handler(server, &uri_setup);
@@ -561,8 +553,6 @@ extern "C" void app_main(void) {
     xTaskCreate(motor_control_task, "motor_task", 4096, NULL, 4, NULL);
     xTaskCreate(console_task, "console_task", 4096, NULL, 5, NULL);
 
-    // [OPTIONAL: Add your other system initializations for IR, DHT, Automation here]
-
     // 3. Initialize Network Base
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -587,7 +577,7 @@ extern "C" void app_main(void) {
     ap_config.ap.max_connection = 4;
     ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK; 
 
-    // Explicitly configure the IP scheme so it matches the captive portal routing exact expectations
+    // Explicitly configure the IP scheme so it matches the captive portal routing expectations
     esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     if (ap_netif) {
         esp_netif_ip_info_t ip_info;
@@ -655,4 +645,3 @@ extern "C" void app_main(void) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
-#################### END OF FILE: main\main.cpp ####################
