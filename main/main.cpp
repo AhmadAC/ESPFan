@@ -20,17 +20,17 @@
 #include "lwip/netdb.h"
 #include "lwip/err.h"
 
-static const char *TAG = "ESP32_S3";
+static const char *TAG = "ESP32_S3_APP";
 
 httpd_handle_t server = NULL;
 static int64_t disconnect_time = 0;
 static bool ap_fallback_active = false;
 
 // ============================================================================
-// MOTOR CONTROL GLOBALS & TASK (L9110)
+// L9110 MOTOR CONTROL GLOBALS & TASK (Pins 5 & 6)
 // ============================================================================
-#define MOTOR_PIN_A 6
-#define MOTOR_PIN_B 5
+#define MOTOR_PIN_A 5
+#define MOTOR_PIN_B 6
 
 static float target_throttle = 0.0f;
 static float current_throttle = 0.0f;
@@ -72,7 +72,7 @@ void motor_control_task(void *pvParameter) {
     while (1) {
         if (breeze_mode) {
             float nxt = current_throttle + (loop_dir * step);
-            // Drop down to 5% UI (which physically maps to ~52.5% power to prevent stall)
+            // Drop down to 5% UI (maps to prevent stall)
             if (nxt >= 100.0f || nxt <= 5.0f) {
                 loop_dir *= -1.0f;
             }
@@ -90,25 +90,26 @@ void motor_control_task(void *pvParameter) {
 
         uint32_t duty = 0;
         if (fabs(current_throttle) > 0.1f) {
-            // Deadband Fix: Remap 0->100% UI throttle to 50%->100% physical duty cycle (512 -> 1023)
-            duty = 512 + (uint32_t)((fabs(current_throttle) / 100.0f) * 511.0f);
+            // Remap 0->100% UI throttle to physical duty cycle (0 -> 1023)
+            // You can adjust the offset if the motor needs a higher starting voltage
+            duty = (uint32_t)((fabs(current_throttle) / 100.0f) * 1023.0f);
             if (duty > 1023) duty = 1023;
         }
 
         if (current_throttle > 0.1f) {
-            // Forward (Channels swapped to fix backwards rotation)
-            ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
-            ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-            ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, duty);
-            ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
-        } else if (current_throttle < -0.1f) {
-            // Reverse (Channels swapped to fix backwards rotation)
+            // Forward (L9110: A = High/PWM, B = Low)
             ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
             ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
             ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
             ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
+        } else if (current_throttle < -0.1f) {
+            // Reverse (L9110: A = Low, B = High/PWM)
+            ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+            ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+            ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, duty);
+            ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
         } else {
-            // Stopped
+            // Stopped (L9110: A = Low, B = Low)
             ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
             ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
             ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
@@ -541,6 +542,7 @@ void start_webserver(void) {
 
 // ============================================================================
 // MAIN APPLICATION START
+// Notice the 'extern "C"' wrapper -- THIS PREVENTS THE LINKER ERROR!
 // ============================================================================
 extern "C" void app_main(void) {
     ESP_LOGI(TAG, "ESP32-S3 YD Dev Kit Booting up!");
@@ -561,6 +563,8 @@ extern "C" void app_main(void) {
     init_motor_pwm();
     xTaskCreate(motor_control_task, "motor_task", 4096, NULL, 4, NULL);
     xTaskCreate(console_task, "console_task", 4096, NULL, 5, NULL);
+
+    // [OPTIONAL: Add your other system initializations for IR, DHT, Automation here]
 
     // 3. Initialize Network Base
     ESP_ERROR_CHECK(esp_netif_init());
