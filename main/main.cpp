@@ -2,6 +2,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -118,20 +120,77 @@ void motor_control_task(void *pvParameter) {
 // CONSOLE INPUT TASK
 // ============================================================================
 void console_task(void *pvParameters) {
-    ESP_LOGI(TAG, "Console task started. Waiting for inputs...");
+    ESP_LOGI("REPL", "==================================================");
+    ESP_LOGI("REPL", "Available ESPFan REPL Commands:");
+    ESP_LOGI("REPL", "  ap         - Force AP Mode (Wi-Fi Hotspot)");
+    ESP_LOGI("REPL", "  wifi       - Connect to saved Wi-Fi");
+    ESP_LOGI("REPL", "  reset      - Factory Reset NVS (Clears all configs)");
+    ESP_LOGI("REPL", "  (Ctrl+C)   - Ignored");
+    ESP_LOGI("REPL", "  (Ctrl+D)   - Soft Reboot");
+    ESP_LOGI("REPL", "==================================================");
+    
+    int fd = fileno(stdin);
+    int flags = fcntl(fd, F_GETFL);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    uint8_t buf[64];
+    char cmd[64];
+    int cmd_idx = 0;
+    
     while (1) {
-        int c = getchar();
-        if (c != EOF) {
-            if (c == 0x03) { 
-                ESP_LOGI(TAG, "Interrupt received (Ctrl+C)");
-            } else if (c == 0x04) { 
-                ESP_LOGI(TAG, "Soft Reboot received (Ctrl+D). Rebooting...");
-                vTaskDelay(pdMS_TO_TICKS(100)); 
-                esp_restart();
+        int len = read(fd, buf, sizeof(buf));
+        if (len > 0) {
+            for (int i = 0; i < len; i++) {
+                if (buf[i] == 0x03) { 
+                    ESP_LOGW("REPL", "[Sent Ctrl+C - Ignored]");
+                } else if (buf[i] == 0x04) {
+                    ESP_LOGW("REPL", "[Sent Ctrl+D - Soft Reboot]");
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    esp_restart();
+                } else if (buf[i] == '\r' || buf[i] == '\n') {
+                    if (cmd_idx > 0) {
+                        cmd[cmd_idx] = '\0';
+                        if (strcmp(cmd, "reset") == 0) {
+                            ESP_LOGW("REPL", "Command 'reset' received. Factory Resetting NVS...");
+                            nvs_handle_t h;
+                            if (nvs_open("storage", NVS_READWRITE, &h) == ESP_OK) {
+                                nvs_erase_all(h);
+                                nvs_commit(h);
+                                nvs_close(h);
+                            }
+                            vTaskDelay(pdMS_TO_TICKS(500));
+                            esp_restart();
+                        } else if (strcmp(cmd, "ap") == 0) {
+                            ESP_LOGW("REPL", "Command 'ap' received. Switching to Forced AP Mode...");
+                            nvs_handle_t h;
+                            if (nvs_open("storage", NVS_READWRITE, &h) == ESP_OK) {
+                                nvs_set_u8(h, "force_ap", 1);
+                                nvs_commit(h);
+                                nvs_close(h);
+                            }
+                            vTaskDelay(pdMS_TO_TICKS(500));
+                            esp_restart();
+                        } else if (strcmp(cmd, "wifi") == 0) {
+                            ESP_LOGW("REPL", "Command 'wifi' received. Switching to Wi-Fi Mode...");
+                            nvs_handle_t h;
+                            if (nvs_open("storage", NVS_READWRITE, &h) == ESP_OK) {
+                                nvs_set_u8(h, "force_ap", 0);
+                                nvs_commit(h);
+                                nvs_close(h);
+                            }
+                            vTaskDelay(pdMS_TO_TICKS(500));
+                            esp_restart();
+                        }
+                        cmd_idx = 0;
+                    }
+                } else {
+                    if (cmd_idx < sizeof(cmd) - 1) {
+                        cmd[cmd_idx++] = (char)buf[i];
+                    }
+                }
             }
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(10));
         }
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
@@ -417,6 +476,7 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
             if (nvs_open("storage", NVS_READWRITE, &my_handle) == ESP_OK) {
                 nvs_set_str(my_handle, "wifi_ssid", ssid_item->valuestring);
                 nvs_set_str(my_handle, "wifi_pass", pass_item->valuestring);
+                nvs_set_u8(my_handle, "force_ap", 0); // Clear Force AP Flag if User Setup Wi-Fi via Dash
                 nvs_commit(my_handle);
                 nvs_close(my_handle);
                 ESP_LOGI(TAG, "Saved target network: %s", ssid_item->valuestring);
@@ -543,6 +603,9 @@ extern "C" void app_main(void) {
     
     // Silence Wi-Fi PMF SA Query spam and normal info logs
     esp_log_level_set("wifi", ESP_LOG_WARN);
+    
+    // Silence DHCP server assigned IP to a client
+    esp_log_level_set("esp_netif_lwip", ESP_LOG_WARN);
 
     // 1. Initialize NVS
     esp_err_t ret = nvs_flash_init();
@@ -600,8 +663,11 @@ extern "C" void app_main(void) {
     bool has_creds = false;
     char ssid[33] = {0}; 
     char pass[65] = {0};
+    uint8_t force_ap_u8 = 0;
 
     if (nvs_open("storage", NVS_READONLY, &my_handle) == ESP_OK) {
+        nvs_get_u8(my_handle, "force_ap", &force_ap_u8);
+        
         size_t s_len = sizeof(ssid); 
         size_t p_len = sizeof(pass);
         if (nvs_get_str(my_handle, "wifi_ssid", ssid, &s_len) == ESP_OK &&
@@ -609,6 +675,10 @@ extern "C" void app_main(void) {
             has_creds = true;
         }
         nvs_close(my_handle);
+    }
+    
+    if (force_ap_u8 == 1) {
+        has_creds = false;
     }
 
     if (has_creds) {
@@ -636,7 +706,12 @@ extern "C" void app_main(void) {
         disconnect_time = esp_timer_get_time(); 
         esp_wifi_connect();
     } else {
-        ESP_LOGW(TAG, "No Wi-Fi saved. Fallback AP active (Connect to 'ESP32S3_Config', Password: '12345678' / 192.168.4.1)");
+        if (force_ap_u8 == 1) {
+            ESP_LOGW(TAG, "AP Mode Forced by User Configuration.");
+        } else {
+            ESP_LOGW(TAG, "No Wi-Fi saved.");
+        }
+        ESP_LOGI(TAG, "Fallback AP active (Connect to 'ESP32S3_Config', Password: '12345678' / http://192.168.4.1)");
     }
 
     // 7. Start Sub-systems now that the TCP/IP network stack is up
