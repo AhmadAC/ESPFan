@@ -124,6 +124,7 @@ void console_task(void *pvParameters) {
     ESP_LOGI("REPL", "Available ESPFan REPL Commands:");
     ESP_LOGI("REPL", "  ap         - Force AP Mode (Wi-Fi Hotspot)");
     ESP_LOGI("REPL", "  wifi       - Connect to saved Wi-Fi");
+    ESP_LOGI("REPL", "  pw         - Toggle AP Password protection on/off");
     ESP_LOGI("REPL", "  reset      - Factory Reset NVS (Clears all configs)");
     ESP_LOGI("REPL", "  (Ctrl+C)   - Ignored");
     ESP_LOGI("REPL", "  (Ctrl+D)   - Soft Reboot");
@@ -177,6 +178,21 @@ void console_task(void *pvParameters) {
                                 nvs_set_u8(h, "force_ap", 0);
                                 nvs_commit(h);
                                 nvs_close(h);
+                            }
+                            vTaskDelay(pdMS_TO_TICKS(500));
+                            esp_restart();
+                        } else if (strcmp(cmd, "pw") == 0) {
+                            ESP_LOGW("REPL", "Command 'pw' received. Toggling AP Password Protection...");
+                            nvs_handle_t h;
+                            uint8_t ap_open = 0;
+                            if (nvs_open("storage", NVS_READWRITE, &h) == ESP_OK) {
+                                nvs_get_u8(h, "ap_open", &ap_open);
+                                ap_open = !ap_open; // Toggle setting
+                                nvs_set_u8(h, "ap_open", ap_open);
+                                nvs_commit(h);
+                                nvs_close(h);
+                                ESP_LOGI("REPL", "AP Protection toggled. New mode: %s. Rebooting...", 
+                                         ap_open ? "OPEN (No Password)" : "WPA2 (Password '12345678')");
                             }
                             vTaskDelay(pdMS_TO_TICKS(500));
                             esp_restart();
@@ -347,7 +363,7 @@ const char app_html[] = R"raw_html(
 </style>
 <script>
     function updateThrottle(val) {
-        let d = val == 0 ? "Stopped" : (val > 0 ? "Reverse " + val + "%" : "Forward " + Math.abs(val) + "%");
+        let d = val == 0 ? "Stopped" : (val > 0 ? "Forward " + val + "%" : "Reverse " + Math.abs(val) + "%");
         document.getElementById('disp').innerText = d;
         fetch('/api/throttle?val=' + val);
     }
@@ -366,9 +382,9 @@ const char app_html[] = R"raw_html(
             <h2 id="disp" style="font-size:1.8rem;margin:15px 0;color:white;text-shadow:0 0 10px #0ea5e9">Stopped</h2>
             <input type="range" id="slider" min="-100" max="100" value="0" step="5" oninput="updateThrottle(this.value)">
             <div class="grid-3">
-                <button class="btn-gray" onclick="sendCmd('/api/throttle?val=-100','Forward Max', -100)">Fwd</button>
+                <button class="btn-gray" onclick="sendCmd('/api/throttle?val=-100','Reverse Max', -100)">Rev</button>
                 <button class="btn-red" onclick="sendCmd('/api/stop','Stopped', 0)">STOP</button>
-                <button class="btn-gray" onclick="sendCmd('/api/throttle?val=100','Reverse Max', 100)">Rev</button>
+                <button class="btn-gray" onclick="sendCmd('/api/throttle?val=100','Forward Max', 100)">Fwd</button>
             </div>
             <button class="btn-blue" onclick="sendCmd('/api/loop','Breeze Mode')">Breeze Mode</button>
             <button class="btn-gray" style="margin-top:20px; background:#0f172a; border:1px solid #475569;" onclick="location.href='/setup'">Go to Wi-Fi Setup</button>
@@ -634,39 +650,17 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &wifi_event_handler, NULL, &instance_any_id));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip));
 
-    // 4. Configure Fallback AP Mode parameters with WPA2 password to prevent modern OS automatic disconnections
-    wifi_config_t ap_config = {};
-    strcpy((char*)ap_config.ap.ssid, "ESP32S3_Config");
-    strcpy((char*)ap_config.ap.password, "12345678");
-    ap_config.ap.ssid_len = strlen("ESP32S3_Config");
-    ap_config.ap.channel = 1;
-    ap_config.ap.max_connection = 4;
-    ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK; 
-
-    // Explicitly configure the IP scheme so it matches the captive portal routing expectations
-    esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    if (ap_netif) {
-        esp_netif_ip_info_t ip_info;
-        IP4_ADDR(&ip_info.ip, 192, 168, 4, 1);
-        IP4_ADDR(&ip_info.gw, 192, 168, 4, 1);
-        IP4_ADDR(&ip_info.netmask, 255, 255, 255, 0);
-        esp_netif_dhcps_stop(ap_netif);
-        esp_netif_set_ip_info(ap_netif, &ip_info);
-        esp_netif_dhcps_start(ap_netif);
-    }
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
-
-    // 5. Retrieve saved credentials
+    // Retrieve saved configuration flags
     nvs_handle_t my_handle;
     bool has_creds = false;
     char ssid[33] = {0}; 
     char pass[65] = {0};
     uint8_t force_ap_u8 = 0;
+    uint8_t ap_open = 0;
 
     if (nvs_open("storage", NVS_READONLY, &my_handle) == ESP_OK) {
         nvs_get_u8(my_handle, "force_ap", &force_ap_u8);
+        nvs_get_u8(my_handle, "ap_open", &ap_open);
         
         size_t s_len = sizeof(ssid); 
         size_t p_len = sizeof(pass);
@@ -681,17 +675,46 @@ extern "C" void app_main(void) {
         has_creds = false;
     }
 
+    // 4. Configure Fallback AP Mode parameters based on ap_open setting
+    wifi_config_t ap_config = {};
+    strcpy((char*)ap_config.ap.ssid, "ESP32S3_Config");
+    ap_config.ap.ssid_len = strlen("ESP32S3_Config");
+    ap_config.ap.channel = 1;
+    ap_config.ap.max_connection = 4;
+
+    if (ap_open == 1) {
+        ap_config.ap.authmode = WIFI_AUTH_OPEN;
+        memset(ap_config.ap.password, 0, sizeof(ap_config.ap.password));
+    } else {
+        strcpy((char*)ap_config.ap.password, "12345678");
+        ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK; 
+    }
+
+    // Explicitly configure the IP scheme so it matches the captive portal routing expectations
+    esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (ap_netif) {
+        esp_netif_ip_info_t ip_info;
+        IP4_ADDR(&ip_info.ip, 192, 168, 4, 1);
+        IP4_ADDR(&ip_info.gw, 192, 168, 4, 1);
+        IP4_ADDR(&ip_info.netmask, 255, 255, 255, 0);
+        esp_netif_dhcps_stop(ap_netif);
+        esp_netif_set_ip_info(ap_netif, &ip_info);
+        esp_netif_dhcps_start(ap_netif);
+    }
+
     if (has_creds) {
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ap_fallback_active = false;
     } else {
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
         ap_fallback_active = true;
     }
 
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(84)); // Max TX Power (84 * 0.25 dBm = 21 dBm) for maximum range
 
-    // 6. Connect to network if credentials exist
+    // 5. Connect to network if credentials exist
     if (has_creds) {
         ESP_LOGI(TAG, "Connecting to saved network: %s", ssid);
         wifi_config_t sta_config = {};
@@ -709,12 +732,18 @@ extern "C" void app_main(void) {
         if (force_ap_u8 == 1) {
             ESP_LOGW(TAG, "AP Mode Forced by User Configuration.");
         } else {
-            ESP_LOGW(TAG, "No Wi-Fi saved.");
+            ESP_LOGW(TAG, "No Wi-Fi credentials saved.");
         }
-        ESP_LOGI(TAG, "Fallback AP active (Connect to 'ESP32S3_Config', Password: '12345678' / http://192.168.4.1)");
+        
+        if (ap_open == 1) {
+            ESP_LOGI(TAG, "AP Broadcast started. SSID: 'ESP32S3_Config' (OPEN / No Password)");
+        } else {
+            ESP_LOGI(TAG, "AP Broadcast started. SSID: 'ESP32S3_Config' (WPA2 Password: '12345678')");
+        }
+        ESP_LOGI(TAG, "Configuration interface: http://192.168.4.1");
     }
 
-    // 7. Start Sub-systems now that the TCP/IP network stack is up
+    // 6. Start Sub-systems now that the TCP/IP network stack is up
     start_webserver();
     xTaskCreate(dns_server_task, "dns_task", 4096, NULL, 5, NULL);
 
